@@ -1,0 +1,98 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-battle_arena}
+      POSTGRES_USER: ${POSTGRES_USER:-battle_arena}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-battle_arena_secret}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - battle_arena
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-battle_arena} -d ${POSTGRES_DB:-battle_arena}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - battle_arena
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ../battle-arena-api
+      dockerfile: Dockerfile
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file:
+      - ../battle-arena-api/.env
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      APP_URL: http://localhost:8000
+      DB_CONNECTION: pgsql
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: ${POSTGRES_DB:-battle_arena}
+      DB_USERNAME: ${POSTGRES_USER:-battle_arena}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-battle_arena_secret}
+      REDIS_CLIENT: phpredis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CACHE_STORE: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: redis
+      FRONTEND_URL: http://localhost:3000
+    volumes:
+      - ../battle-arena-api:/var/www/html
+      - api_vendor:/var/www/html/vendor
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - battle_arena
+    command: >
+      sh -c "composer install --prefer-dist --no-interaction
+      && php artisan key:generate --force --no-interaction || true
+      && php artisan serve --host=0.0.0.0 --port=8000"
+
+  web:
+    build:
+      context: ../battle-arena-web
+      dockerfile: Dockerfile
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+    volumes:
+      - ../battle-arena-web:/app
+      - web_node_modules:/app/node_modules
+    depends_on:
+      - api
+    networks:
+      - battle_arena
+
+volumes:
+  postgres_data:
+  api_vendor:
+  web_node_modules:
+
+networks:
+  battle_arena:
+    driver: bridge
+    name: battle_arena_net
