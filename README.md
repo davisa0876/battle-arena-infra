@@ -7,7 +7,7 @@ Central Docker Compose development environment for sibling repositories.
 | Repository | Role |
 |------------|------|
 | `battle-arena-api` | Laravel 13 modular monolith REST API |
-| `battle-arena-web` | React + Vite web client |
+| `battle-arena-web` | React + Vite + Tailwind web client |
 | `battle-arena-mobile` | Expo React Native client (runs outside Docker) |
 | `battle-arena-infra` | Local Compose orchestration only |
 
@@ -24,15 +24,29 @@ flowchart LR
     API[battle-arena-api<br/>:8000]
     PG[(PostgreSQL)]
     Redis[(Redis)]
+    S3[RustFS S3<br/>:9000 / console :9001]
   end
 
   Web -->|HTTP REST /api| API
   Mobile -->|HTTP REST /api| API
   API --> PG
   API --> Redis
+  API -->|profile photos| S3
 ```
 
-Web and mobile consume the **same** API. Battle logic will remain server-authoritative in future phases. Phase 1 has **no WebSockets**.
+Web and mobile consume the **same** API. Battle logic stays server-authoritative in later phases. Phase 1 has **no WebSockets**.
+
+## Services and ports
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| `web` | 3000 | Vite React app |
+| `api` | 8000 | Laravel REST API |
+| `postgres` | 5432 | Database |
+| `redis` | 6379 | Cache / session / queue |
+| `minio` (RustFS) | 9000 | S3 API for profile photos |
+| `minio` console | 9001 | Object storage admin UI |
+| `minio-init` | — | Creates bucket `battle-arena-profiles` once |
 
 ## First-time setup
 
@@ -61,9 +75,9 @@ docker compose up --build -d
 docker compose down
 
 # Logs
-docker compose logs -f api web postgres redis
+docker compose logs -f api web postgres redis minio
 
-# API migrations (none in Phase 1 yet)
+# API migrations
 docker compose exec api php artisan migrate
 
 # API tests
@@ -82,21 +96,44 @@ npx expo start
 ## Networking
 
 - Private Compose network: `battle_arena_net`
-- Inside Docker: `DB_HOST=postgres`, `REDIS_HOST=redis`
-- Browser calls API at `http://localhost:8000` (host-published port)
+- Inside Docker: `DB_HOST=postgres`, `REDIS_HOST=redis`, `AWS_ENDPOINT=http://minio:9000`
+- Browser calls API at `http://localhost:8000`
 - Mobile:
   - Android emulator: `http://10.0.2.2:8000`
   - iOS simulator: `http://localhost:8000`
   - Physical device: `http://<LAN-IP>:8000`
 
+## Local S3 (profile photos)
+
+The Compose service is named `minio`. The engine is **RustFS** (S3-compatible + admin console) because MinIO Community Edition images were removed from Docker Hub.
+
+The API uses disks `s3` and `profiles` (`Storage::disk('profiles')`).
+
+| Item | Value |
+|------|--------|
+| Console (admin UI) | [http://localhost:9001/rustfs/console/](http://localhost:9001/rustfs/console/) |
+| S3 API | [http://localhost:9000](http://localhost:9000) |
+| Access key | `battlearena` (`MINIO_ROOT_USER`) |
+| Secret key | `battlearena_minio` (`MINIO_ROOT_PASSWORD`) |
+| Bucket | `battle-arena-profiles` (public `GetObject`) |
+
+Sign in at the console URL with the access/secret keys, then browse objects under `profiles/`.
+
+```bash
+# Restart only storage
+docker compose up -d minio minio-init
+```
+
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| API not ready | `docker compose logs api postgres redis` |
+| API not ready | `docker compose logs api postgres redis minio` |
 | Web cannot reach API | Confirm `VITE_API_BASE_URL=http://localhost:8000` |
+| Console login fails | Open `/rustfs/console/` and use `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `.env` |
+| Bucket missing | `docker compose up minio-init` |
 | Vendor/node_modules missing after mount | Named volumes `api_vendor` / `web_node_modules` protect dependencies |
-| Port busy | Change `API_PORT` / `WEB_PORT` in `.env` |
+| Port busy | Change `API_PORT` / `WEB_PORT` / `MINIO_*_PORT` in `.env` |
 
 ## ADR: Independent repositories + central Compose
 
