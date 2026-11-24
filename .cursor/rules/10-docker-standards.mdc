@@ -1,0 +1,12 @@
+---
+description: Docker Compose conventions
+globs: "{compose.yaml,README.md,.env.example}"
+alwaysApply: false
+---
+
+# Docker Standards
+
+- API depends on Postgres + Redis only for catalog health.
+- Document LAN mobile access via `API_BIND_ADDRESS=0.0.0.0` only (see `20-networking.mdc`).
+- Prefer explicit healthchecks and non-destructive data volumes.
+- After `package.json` changes in web, reinstall inside the `web` container because of named `node_modules` volumes.

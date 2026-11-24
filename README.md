@@ -38,7 +38,7 @@ Web and mobile consume the **same** API. Creature catalog data is served from Po
 
 ## Services and ports
 
-By default published ports bind to `127.0.0.1` only.
+By default published ports bind to `127.0.0.1` only (see [Network security](#network-security-and-mobile-lan-access) for per-service bind variables).
 
 | Service | Port | Purpose | Default bind |
 |---------|------|---------|--------------|
@@ -85,15 +85,34 @@ docker compose exec web npm test
 
 ## Network security and mobile LAN access
 
-- Default: `BIND_ADDRESS=127.0.0.1` so Postgres, Redis, API, and Web are not reachable from other machines.
-- Physical mobile device on the LAN:
+Each published port has its own bind variable. They are **independent**: changing one never affects the others.
+
+| Variable | Service | Default | May be `0.0.0.0`? |
+|----------|---------|---------|-------------------|
+| `API_BIND_ADDRESS` | `api` | `127.0.0.1` | Yes, for physical mobile device testing |
+| `WEB_BIND_ADDRESS` | `web` | `127.0.0.1` | Optional (LAN browser access) |
+| `POSTGRES_BIND_ADDRESS` | `postgres` | `127.0.0.1` | **No** |
+| `REDIS_BIND_ADDRESS` | `redis` | `127.0.0.1` | **No** |
+| `MINIO_BIND_ADDRESS` | `minio` (profile `storage`) | `127.0.0.1` | **No** (use signed URLs through the API) |
+
+> The legacy shared `BIND_ADDRESS` variable is no longer read by `compose.yaml`. Remove it from your local `.env` if present.
+
+Physical mobile device on the LAN — set **only** the API (and optionally Web):
 
 ```env
 # battle-arena-infra/.env
-BIND_ADDRESS=0.0.0.0
+API_BIND_ADDRESS=0.0.0.0
+# WEB_BIND_ADDRESS=0.0.0.0   # optional
 ```
 
-Then restart Compose and point the mobile app at `http://<your-LAN-IP>:8000`.
+Then refresh the port bindings (does not touch volumes) and point the mobile app at `http://<your-LAN-IP>:8000`:
+
+```bash
+docker compose up -d
+docker compose ps   # postgres/redis must still show 127.0.0.1
+```
+
+Allow inbound TCP 8000 in your OS firewall for the private network only. Revert to `API_BIND_ADDRESS=127.0.0.1` when you are done.
 
 Simulators:
 
@@ -109,6 +128,16 @@ The API entrypoint (`battle-arena-api/scripts/docker-entrypoint.sh`):
 3. Never uses `key:generate --force`
 4. Refuses to start if the key is still missing/invalid
 5. Does not hide initialization failures with `|| true`
+
+### First-time blank `APP_KEY`
+
+`battle-arena-api/.env.example` ships with `APP_KEY=` (blank). On the first container start:
+
+1. `cp .env.example .env` (done by you, or by the entrypoint if `.env` is absent).
+2. The entrypoint sees no valid `base64:...` key in the environment or `.env`, runs `php artisan key:generate --no-interaction`, and writes the key to `battle-arena-api/.env` (bind-mounted, so it lives on the host).
+3. The key is validated by booting Laravel; the container exits if it is still invalid.
+
+On every later restart (`docker compose restart`, `up -d`, `down` + `up`) the key is already in `.env`, so the entrypoint logs `APP_KEY already present` and **keeps it**. Do not rotate it by hand unless you accept invalidating encrypted data and sessions. Never run `key:generate --force`.
 
 ## Optional local S3 (RustFS)
 

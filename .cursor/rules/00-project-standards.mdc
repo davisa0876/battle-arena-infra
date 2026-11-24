@@ -1,0 +1,13 @@
+---
+description: Infra repository standards
+alwaysApply: true
+---
+
+# Battle Arena Infra Standards
+
+- Compose orchestration only. Sibling repos remain independent.
+- Default published ports bind to localhost via per-service variables (`API_BIND_ADDRESS`, `WEB_BIND_ADDRESS`, `POSTGRES_BIND_ADDRESS`, `REDIS_BIND_ADDRESS`, `MINIO_BIND_ADDRESS`). Postgres/Redis are never LAN-exposed.
+- Never delete Docker volumes (e.g. `postgres_data`) without explicit approval.
+- Never rotate Laravel `APP_KEY` with `--force` on startup.
+- Do not hide init failures with `|| true`.
+- Storage/RustFS is optional via `--profile storage` and private by default.
