@@ -24,36 +24,36 @@ flowchart LR
     API[battle-arena-api<br/>:8000]
     PG[(PostgreSQL)]
     Redis[(Redis)]
-    S3[RustFS S3<br/>:9000 / console :9001]
+    S3[RustFS S3<br/>profile: storage]
   end
 
   Web -->|HTTP REST /api| API
   Mobile -->|HTTP REST /api| API
   API --> PG
   API --> Redis
-  API -->|profile photos| S3
+  API -.->|optional profile photos| S3
 ```
 
-Web and mobile consume the **same** API. Battle logic stays server-authoritative in later phases. Phase 1 has **no WebSockets**.
+Web and mobile consume the **same** API. Creature catalog data is served from PostgreSQL. PokéAPI is used only by the Artisan import command.
 
 ## Services and ports
 
-| Service | Port | Purpose |
-|---------|------|---------|
-| `web` | 3000 | Vite React app |
-| `api` | 8000 | Laravel REST API |
-| `postgres` | 5432 | Database |
-| `redis` | 6379 | Cache / session / queue |
-| `minio` (RustFS) | 9000 | S3 API for profile photos |
-| `minio` console | 9001 | Object storage admin UI |
-| `minio-init` | — | Creates bucket `battle-arena-profiles` once |
+By default published ports bind to `127.0.0.1` only.
+
+| Service | Port | Purpose | Default bind |
+|---------|------|---------|--------------|
+| `web` | 3000 | Vite React app | localhost |
+| `api` | 8000 | Laravel REST API | localhost |
+| `postgres` | 5432 | Database | localhost |
+| `redis` | 6379 | Cache / session / queue | localhost |
+| `minio` (RustFS) | 9000 / 9001 | Optional S3 (`--profile storage`) | localhost |
 
 ## First-time setup
 
 ```bash
-# From sibling checkout root
 cd battle-arena-api
 cp .env.example .env
+# APP_KEY is generated safely on first API container start (never force-rotated)
 
 cd ../battle-arena-web
 cp .env.example .env
@@ -61,6 +61,8 @@ cp .env.example .env
 cd ../battle-arena-infra
 cp .env.example .env
 docker compose up --build -d
+docker compose exec api php artisan migrate
+docker compose exec api php artisan creatures:import
 ```
 
 ## Day-to-day commands
@@ -68,75 +70,67 @@ docker compose up --build -d
 ```bash
 cd battle-arena-infra
 
-# Build and start
 docker compose up --build -d
-
-# Stop
 docker compose down
+docker compose logs -f api web postgres redis
 
-# Logs
-docker compose logs -f api web postgres redis minio
-
-# API migrations
 docker compose exec api php artisan migrate
-
-# API tests
+docker compose exec api php artisan creatures:import
 docker compose exec api php artisan test
 
-# Web lint / typecheck
 docker compose exec web npm run lint
 docker compose exec web npm run typecheck
-
-# Mobile (host machine, not Docker)
-cd ../battle-arena-mobile
-npm install
-npx expo start
+docker compose exec web npm test
 ```
 
-## Networking
+## Network security and mobile LAN access
 
-- Private Compose network: `battle_arena_net`
-- Inside Docker: `DB_HOST=postgres`, `REDIS_HOST=redis`, `AWS_ENDPOINT=http://minio:9000`
-- Browser calls API at `http://localhost:8000`
-- Mobile:
-  - Android emulator: `http://10.0.2.2:8000`
-  - iOS simulator: `http://localhost:8000`
-  - Physical device: `http://<LAN-IP>:8000`
+- Default: `BIND_ADDRESS=127.0.0.1` so Postgres, Redis, API, and Web are not reachable from other machines.
+- Physical mobile device on the LAN:
 
-## Local S3 (profile photos)
+```env
+# battle-arena-infra/.env
+BIND_ADDRESS=0.0.0.0
+```
 
-The Compose service is named `minio`. The engine is **RustFS** (S3-compatible + admin console) because MinIO Community Edition images were removed from Docker Hub.
+Then restart Compose and point the mobile app at `http://<your-LAN-IP>:8000`.
 
-The API uses disks `s3` and `profiles` (`Storage::disk('profiles')`).
+Simulators:
+
+- Android emulator: `http://10.0.2.2:8000`
+- iOS simulator: `http://localhost:8000`
+
+## Application key policy
+
+The API entrypoint (`battle-arena-api/scripts/docker-entrypoint.sh`):
+
+1. Runs `composer install`
+2. Generates `APP_KEY` **only** when missing
+3. Never uses `key:generate --force`
+4. Refuses to start if the key is still missing/invalid
+5. Does not hide initialization failures with `|| true`
+
+## Optional local S3 (RustFS)
+
+Storage is **not** required for health checks, readiness, or the creature catalog.
+
+```bash
+docker compose --profile storage up -d minio minio-init
+```
 
 | Item | Value |
 |------|--------|
-| Console (admin UI) | [http://localhost:9001/rustfs/console/](http://localhost:9001/rustfs/console/) |
+| Console | [http://localhost:9001/rustfs/console/](http://localhost:9001/rustfs/console/) |
 | S3 API | [http://localhost:9000](http://localhost:9000) |
-| Access key | `battlearena` (`MINIO_ROOT_USER`) |
-| Secret key | `battlearena_minio` (`MINIO_ROOT_PASSWORD`) |
-| Bucket | `battle-arena-profiles` (public `GetObject`) |
+| Bucket | `battle-arena-profiles` (**private**) |
 
-Sign in at the console URL with the access/secret keys, then browse objects under `profiles/`.
+### Public avatars later (without exposing unrelated files)
 
-```bash
-# Restart only storage
-docker compose up -d minio minio-init
-```
+Keep the bucket private by default. Prefer one of:
 
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| API not ready | `docker compose logs api postgres redis minio` |
-| Web cannot reach API | Confirm `VITE_API_BASE_URL=http://localhost:8000` |
-| Console login fails | Open `/rustfs/console/` and use `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` from `.env` |
-| Bucket missing | `docker compose up minio-init` |
-| Vendor/node_modules missing after mount | Named volumes `api_vendor` / `web_node_modules` protect dependencies |
-| Port busy | Change `API_PORT` / `WEB_PORT` / `MINIO_*_PORT` in `.env` |
+1. Short-lived signed `GetObject` URLs for authenticated profile photo delivery
+2. A dedicated public prefix such as `public-avatars/*` with a **scoped** bucket policy that grants anonymous read only under that prefix — never `bucket/*`
 
 ## ADR: Independent repositories + central Compose
 
 We use four Git repositories so API, web, mobile, and infra remain independently deployable and versioned. A single Compose file in `battle-arena-infra` references sibling build contexts for local developer experience without creating a monorepo.
-
-We intentionally do **not** add a Node.js WebSocket service in Phase 1. Real-time multiplayer can be introduced later behind the same authoritative Laravel domain model (for example Laravel Reverb) once core REST boundaries and battle rules exist.
