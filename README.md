@@ -24,6 +24,7 @@ flowchart LR
     API[battle-arena-api<br/>:8000]
     PG[(PostgreSQL)]
     Redis[(Redis)]
+    Mail[Mailpit<br/>:8025]
     S3[RustFS S3<br/>profile: storage]
   end
 
@@ -31,6 +32,7 @@ flowchart LR
   Mobile -->|HTTP REST /api| API
   API --> PG
   API --> Redis
+  API --> Mail
   API -.->|optional profile photos| S3
 ```
 
@@ -47,6 +49,7 @@ By default published ports bind to `127.0.0.1` only (see [Network security](#net
 | `postgres` | 5432 | Database | localhost |
 | `redis` | 6379 | Cache / session / queue | localhost |
 | `minio` (RustFS) | 9000 / 9001 | Optional S3 (`--profile storage`) | localhost |
+| `mailpit` | 8025 / 1025 | Local email UI / SMTP | localhost |
 
 ## First-time setup
 
@@ -139,12 +142,24 @@ The API entrypoint (`battle-arena-api/scripts/docker-entrypoint.sh`):
 
 On every later restart (`docker compose restart`, `up -d`, `down` + `up`) the key is already in `.env`, so the entrypoint logs `APP_KEY already present` and **keeps it**. Do not rotate it by hand unless you accept invalidating encrypted data and sessions. Never run `key:generate --force`.
 
+## Email testing (Mailpit)
+
+Verification and password-reset emails are delivered to Mailpit in local Compose:
+
+| Item | Value |
+|------|--------|
+| UI | [http://localhost:8025](http://localhost:8025) |
+| SMTP | `mailpit:1025` (from the API container) |
+
+Basic login/profile work does **not** require RustFS. Avatars persist on the `api_profiles` Docker volume when `PROFILES_DISK=profiles_local`.
+
 ## Optional local S3 (RustFS)
 
-Storage is **not** required for health checks, readiness, or the creature catalog.
+Storage is **not** required for health checks, readiness, catalog, auth, or profiles.
 
 ```bash
 docker compose --profile storage up -d minio minio-init
+# Then set PROFILES_DISK=profiles in battle-arena-infra/.env and recreate the API container
 ```
 
 | Item | Value |
@@ -153,12 +168,13 @@ docker compose --profile storage up -d minio minio-init
 | S3 API | [http://localhost:9000](http://localhost:9000) |
 | Bucket | `battle-arena-profiles` (**private**) |
 
-### Public avatars later (without exposing unrelated files)
+Avatars are served through the API (`GET /api/avatars/{user}`), not by exposing the private bucket.
 
-Keep the bucket private by default. Prefer one of:
+If MinIO/RustFS containers exit with a stale network error after Compose network recreation:
 
-1. Short-lived signed `GetObject` URLs for authenticated profile photo delivery
-2. A dedicated public prefix such as `public-avatars/*` with a **scoped** bucket policy that grants anonymous read only under that prefix — never `bucket/*`
+```bash
+docker compose --profile storage up -d --force-recreate minio minio-init
+```
 
 ## ADR: Independent repositories + central Compose
 

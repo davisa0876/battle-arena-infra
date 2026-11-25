@@ -90,6 +90,20 @@ services:
       - battle_arena
     restart: "no"
 
+  # Local SMTP catcher for email verification and password reset (Phase 3).
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "${MAILPIT_BIND_ADDRESS:-127.0.0.1}:${MAILPIT_UI_PORT:-8025}:8025"
+      - "${MAILPIT_BIND_ADDRESS:-127.0.0.1}:${MAILPIT_SMTP_PORT:-1025}:1025"
+    networks:
+      - battle_arena
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: ../battle-arena-api
@@ -116,8 +130,12 @@ services:
       SESSION_DRIVER: redis
       QUEUE_CONNECTION: redis
       FRONTEND_URL: http://localhost:3000
-      # Storage is optional for Phase 2A; keep S3 config available without blocking startup.
+      SANCTUM_STATEFUL_DOMAINS: localhost:3000,127.0.0.1:3000
+      SESSION_DOMAIN: localhost
+      SESSION_SAME_SITE: lax
+      # Avatar storage: local disk by default (persistent volume). Set profiles when --profile storage is up.
       FILESYSTEM_DISK: ${FILESYSTEM_DISK:-local}
+      PROFILES_DISK: ${PROFILES_DISK:-profiles_local}
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-battlearena}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-battlearena_minio}
       AWS_DEFAULT_REGION: ${MINIO_REGION:-us-east-1}
@@ -125,13 +143,26 @@ services:
       AWS_ENDPOINT: http://minio:9000
       AWS_URL: http://localhost:${MINIO_API_PORT:-9000}/${MINIO_BUCKET:-battle-arena-profiles}
       AWS_USE_PATH_STYLE_ENDPOINT: "true"
+      # Mailpit for verification / password-reset emails
+      MAIL_MAILER: smtp
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+      MAIL_USERNAME: null
+      MAIL_PASSWORD: null
+      MAIL_SCHEME: null
+      MAIL_FROM_ADDRESS: hello@battlearena.local
+      MAIL_FROM_NAME: Battle Arena
     volumes:
       - ../battle-arena-api:/var/www/html
       - api_vendor:/var/www/html/vendor
+      # Persistent local avatar fallback when RustFS/S3 is disabled
+      - api_profiles:/var/www/html/storage/app/profiles
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      mailpit:
         condition: service_healthy
     networks:
       - battle_arena
@@ -160,6 +191,7 @@ volumes:
   postgres_data:
   minio_data:
   api_vendor:
+  api_profiles:
   web_node_modules:
 
 networks:
