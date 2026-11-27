@@ -2,6 +2,8 @@
 
 One local Docker Compose environment for daily development **that mirrors the proposed AWS production architecture**: Laravel runs as a Bref Lambda function behind an API Gateway emulator, realtime runs as an event-driven Node.js Lambda behind a WebSocket API emulator, and the React app is served as a static production build.
 
+**This repository is responsible for creating the local environment: start here to run the project locally.**
+
 This repo **only orchestrates** local containers. Application source lives in the sibling repositories. Nothing here contacts AWS, creates cloud accounts or uses paid services.
 
 ```bash
@@ -122,11 +124,11 @@ flowchart LR
 
 ```bash
 # 1. Clone the sibling repositories (realtime repo must be cloned into battle-arena-realtime)
-git clone <api-remote> battle-arena-api
-git clone <web-remote> battle-arena-web
-git clone <mobile-remote> battle-arena-mobile
+git clone https://github.com/davisa0876/battle-arena-api.git battle-arena-api
+git clone https://github.com/davisa0876/battle-arena-web.git battle-arena-web
+git clone https://github.com/davisa0876/battle-arena-mobile.git battle-arena-mobile
 git clone https://github.com/davisa0876/battle-arena-realtime-websocket.git battle-arena-realtime
-git clone <infra-remote> battle-arena-infra
+git clone https://github.com/davisa0876/battle-arena-infra.git battle-arena-infra
 
 # 2. Environment files
 cp battle-arena-api/.env.example battle-arena-api/.env
