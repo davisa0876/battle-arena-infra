@@ -1,0 +1,16 @@
+{
+  "name": "battle-arena-local-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local API Gateway (HTTP + WebSocket), Lambda Invoke and EventBridge emulator for Battle Arena local development",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "ws": "8.22.1"
+  }
+}

@@ -1,3 +1,123 @@
+# Battle Arena — single local environment with AWS production parity.
+#
+#   docker compose up -d --build
+#
+# Production (proposed)                    Local service
+# --------------------------------------   ------------------------------------------------------
+# API Gateway HTTP + WebSocket APIs         gateway   (local emulator, also Lambda Invoke API,
+#                                                      @connections API and EventBridge schedule)
+# Lambda + Bref: Laravel HTTP function      api       (bref/php-84:3, PHP-FPM runtime)
+# Lambda + Bref: artisan / scheduler        console   (bref/php-84:3, console runtime)
+# Lambda: Node.js WebSocket transport       realtime  (public.ecr.aws/lambda/nodejs:22)
+# S3 + CloudFront: React SPA                web       (production build behind Nginx)
+# Neon PostgreSQL                           postgres
+# Upstash Redis                             redis     (single logical DB, like Upstash)
+# Amazon S3                                 minio     (RustFS) + minio-init (bucket bootstrap)
+# Email provider                            mailpit
+#
+# Ports are unchanged: web 3000, API 8000, WebSocket ws://localhost:3001/ws.
+# Nothing here contacts AWS or any paid service.
+
+x-lambda-container: &lambda-container
+  # Lambda code packages are read-only; only /tmp (512 MB default ephemeral storage) is writable.
+  read_only: true
+  # Lambda runs functions as an unprivileged sandbox user (sbx_user1051, uid 993), never root.
+  user: "993:990"
+  tmpfs:
+    - /tmp:size=512m,mode=1777
+  networks:
+    - battle_arena
+  restart: unless-stopped
+
+# Hot reload: application code is bind-mounted over the image; vendor/ stays the image's
+# (rebuild after composer.json changes). PHP-FPM revalidates changed files on each request.
+x-api-source: &api-source
+  - ../battle-arena-api/app:/var/task/app
+  - ../battle-arena-api/bootstrap:/var/task/bootstrap
+  - ../battle-arena-api/config:/var/task/config
+  - ../battle-arena-api/database:/var/task/database
+  - ../battle-arena-api/docs:/var/task/docs
+  - ../battle-arena-api/lang:/var/task/lang
+  - ../battle-arena-api/public:/var/task/public
+  - ../battle-arena-api/resources:/var/task/resources
+  - ../battle-arena-api/routes:/var/task/routes
+  - ../battle-arena-api/storage/api-docs:/var/task/storage/api-docs
+  - ../battle-arena-api/tests:/var/task/tests
+  - ../battle-arena-api/artisan:/var/task/artisan
+  - ../battle-arena-api/phpunit.xml:/var/task/phpunit.xml
+  # Local-only conveniences (never part of a Lambda artifact): tests read .env, PHPUnit caches results.
+  - ../battle-arena-api/.env:/var/task/.env:ro
+  - ../battle-arena-api/.phpunit.result.cache:/var/task/.phpunit.result.cache
+
+x-api-environment: &api-environment
+  # --- Lambda function configuration (what Terraform would set on the function) ---
+  AWS_LAMBDA_FUNCTION_MEMORY_SIZE: "1024"
+  APP_ENV: local
+  APP_DEBUG: "true"
+  APP_URL: http://localhost:${API_PORT:-8000}
+  # CloudWatch Logs only receive stdout/stderr: `docker compose logs -f api`.
+  LOG_CHANNEL: stderr
+  # Binary bodies (avatars) must be base64-encoded through API Gateway.
+  BREF_BINARY_RESPONSES: "1"
+  # Bootstrap caches live in /tmp (writable) and are rebuilt per cold start, so route/config
+  # changes apply without rebuilding the image. A production artifact ships the baked caches.
+  APP_PACKAGES_CACHE: /tmp/packages.php
+  APP_SERVICES_CACHE: /tmp/services.php
+  APP_ROUTES_CACHE: /tmp/routes.php
+  APP_EVENTS_CACHE: /tmp/events.php
+  APP_CONFIG_CACHE: /tmp/config.php
+  # storage/ lives in /tmp from the first line of boot, so every config path (views, local disks)
+  # resolves to writable storage, exactly as the Bref bridge arranges it on Lambda.
+  LARAVEL_STORAGE_PATH: /tmp/storage
+  VIEW_COMPILED_PATH: /tmp/storage/framework/views
+  DB_CONNECTION: pgsql
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_DATABASE: ${POSTGRES_DB:-battle_arena}
+  DB_USERNAME: ${POSTGRES_USER:-battle_arena}
+  DB_PASSWORD: ${POSTGRES_PASSWORD:-battle_arena_secret}
+  # Upstash exposes one logical database: every Laravel Redis connection uses index 0.
+  REDIS_CLIENT: predis
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_CACHE_DB: "0"
+  CACHE_STORE: redis
+  SESSION_DRIVER: redis
+  # No long-running worker on Lambda; gameplay dispatches no queued jobs.
+  QUEUE_CONNECTION: sync
+  # First origin = the SPA (used in email links); 5173 = optional Vite dev server on the host (HMR).
+  FRONTEND_URL: http://localhost:${WEB_PORT:-3000},http://localhost:5173
+  SANCTUM_STATEFUL_DOMAINS: localhost:${WEB_PORT:-3000},127.0.0.1:${WEB_PORT:-3000},localhost:5173
+  SESSION_DOMAIN: localhost
+  SESSION_SAME_SITE: lax
+  # Amazon S3 via RustFS: avatars must not live on the ephemeral Lambda filesystem.
+  FILESYSTEM_DISK: local
+  PROFILES_DISK: profiles
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-battlearena}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-battlearena_minio}
+  AWS_DEFAULT_REGION: ${MINIO_REGION:-us-east-1}
+  AWS_BUCKET: ${MINIO_BUCKET:-battle-arena-profiles}
+  AWS_ENDPOINT: http://minio:9000
+  AWS_URL: http://localhost:${MINIO_API_PORT:-9000}/${MINIO_BUCKET:-battle-arena-profiles}
+  AWS_USE_PATH_STYLE_ENDPOINT: "true"
+  MAIL_MAILER: smtp
+  MAIL_HOST: mailpit
+  MAIL_PORT: "1025"
+  MAIL_USERNAME: "null"
+  MAIL_PASSWORD: "null"
+  MAIL_SCHEME: "null"
+  MAIL_FROM_ADDRESS: hello@battlearena.local
+  MAIL_FROM_NAME: Battle Arena
+  # WebSocket ticket contract shared with the realtime function.
+  PUBLIC_WS_URL: ${PUBLIC_WS_URL:-ws://localhost:3001/ws}
+  WS_TICKET_REDIS_PREFIX: ${WS_TICKET_REDIS_PREFIX:-battle-arena:ws-ticket:}
+  WS_TICKET_TTL_SECONDS: ${WS_TICKET_TTL_SECONDS:-30}
+  # Event-driven realtime: async Lambda invoke of the realtime function (no Redis Pub/Sub).
+  PVP_REALTIME_DRIVER: lambda
+  PVP_REALTIME_LAMBDA_FUNCTION: battle-arena-realtime
+  PVP_REALTIME_LAMBDA_ENDPOINT: http://gateway:9001
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -31,11 +151,9 @@ services:
       timeout: 3s
       retries: 10
 
-  # Local S3 for future profile photos. RustFS replaces MinIO CE (Docker Hub images removed).
-  # Not required for API health/ready or the creature catalog.
+  # Amazon S3 stand-in. RustFS replaces MinIO CE (Docker Hub images removed).
   minio:
     image: rustfs/rustfs:1.0.4
-    profiles: ["storage"]
     environment:
       RUSTFS_ACCESS_KEY: ${MINIO_ROOT_USER:-battlearena}
       RUSTFS_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-battlearena_minio}
@@ -59,9 +177,9 @@ services:
       retries: 10
       start_period: 10s
 
+  # One-shot bucket bootstrap (exits 0), the local equivalent of the Terraform-managed bucket.
   minio-init:
     image: amazon/aws-cli:2.22.35
-    profiles: ["storage"]
     depends_on:
       minio:
         condition: service_healthy
@@ -90,7 +208,7 @@ services:
       - battle_arena
     restart: "no"
 
-  # Local SMTP catcher for email verification and password reset (Phase 3).
+  # Local SMTP catcher for email verification and password reset.
   mailpit:
     image: axllent/mailpit:v1.27
     ports:
@@ -104,143 +222,161 @@ services:
       timeout: 3s
       retries: 10
 
+  # Lambda: Laravel HTTP function (Bref PHP-FPM runtime). Not published: reached through `gateway`.
+  # Artisan for development: docker compose exec api php artisan <command>
   api:
+    <<: *lambda-container
+    image: battle-arena-api:lambda-fpm
     build:
       context: ../battle-arena-api
-      dockerfile: Dockerfile
-    ports:
-      # Default localhost. Set API_BIND_ADDRESS=0.0.0.0 ONLY for physical mobile device access.
-      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
+      dockerfile: ../battle-arena-infra/docker/api/Dockerfile
+      target: fpm
+      additional_contexts:
+        lambda: ./docker/api
+    mem_limit: 1024m
     env_file:
+      # APP_KEY, feature switches and other values from the API's own .env.
       - ../battle-arena-api/.env
     environment:
-      APP_ENV: local
-      APP_DEBUG: "true"
-      APP_URL: http://localhost:8000
-      DB_CONNECTION: pgsql
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_DATABASE: ${POSTGRES_DB:-battle_arena}
-      DB_USERNAME: ${POSTGRES_USER:-battle_arena}
-      DB_PASSWORD: ${POSTGRES_PASSWORD:-battle_arena_secret}
-      REDIS_CLIENT: predis
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      CACHE_STORE: redis
-      SESSION_DRIVER: redis
-      QUEUE_CONNECTION: redis
-      FRONTEND_URL: http://localhost:3000
-      SANCTUM_STATEFUL_DOMAINS: localhost:3000,127.0.0.1:3000
-      SESSION_DOMAIN: localhost
-      SESSION_SAME_SITE: lax
-      # Avatar storage: local disk by default (persistent volume). Set profiles when --profile storage is up.
-      FILESYSTEM_DISK: ${FILESYSTEM_DISK:-local}
-      PROFILES_DISK: ${PROFILES_DISK:-profiles_local}
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-battlearena}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-battlearena_minio}
-      AWS_DEFAULT_REGION: ${MINIO_REGION:-us-east-1}
-      AWS_BUCKET: ${MINIO_BUCKET:-battle-arena-profiles}
-      AWS_ENDPOINT: http://minio:9000
-      AWS_URL: http://localhost:${MINIO_API_PORT:-9000}/${MINIO_BUCKET:-battle-arena-profiles}
-      AWS_USE_PATH_STYLE_ENDPOINT: "true"
-      # Mailpit for verification / password-reset emails
-      MAIL_MAILER: smtp
-      MAIL_HOST: mailpit
-      MAIL_PORT: 1025
-      MAIL_USERNAME: null
-      MAIL_PASSWORD: null
-      MAIL_SCHEME: null
-      MAIL_FROM_ADDRESS: hello@battlearena.local
-      MAIL_FROM_NAME: Battle Arena
-      # Phase 5A — WebSocket ticket contract (shared with realtime service)
-      PUBLIC_WS_URL: ${PUBLIC_WS_URL:-ws://localhost:3001/ws}
-      WS_TICKET_REDIS_PREFIX: ${WS_TICKET_REDIS_PREFIX:-battle-arena:ws-ticket:}
-      WS_TICKET_TTL_SECONDS: ${WS_TICKET_TTL_SECONDS:-30}
-    volumes:
-      - ../battle-arena-api:/var/www/html
-      - api_vendor:/var/www/html/vendor
-      # Persistent local avatar fallback when RustFS/S3 is disabled
-      - api_profiles:/var/www/html/storage/app/profiles
+      <<: *api-environment
+      AWS_LAMBDA_FUNCTION_NAME: battle-arena-api
+      AWS_LAMBDA_FUNCTION_TIMEOUT: "28"
+    volumes: *api-source
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       mailpit:
         condition: service_healthy
-    networks:
-      - battle_arena
-    entrypoint: ["/bin/sh", "/var/www/html/scripts/docker-entrypoint.sh"]
 
-  web:
+  # Lambda: artisan (Bref console runtime), the target of the EventBridge rate(1 minute) rule that
+  # runs `schedule:run` (PvP turn-deadline adjudication). An RIE container must be running to
+  # receive invocations; it is idle in between.
+  console:
+    <<: *lambda-container
+    image: battle-arena-api:lambda-console
     build:
-      context: ../battle-arena-web
-      dockerfile: Dockerfile
-    ports:
-      # Default localhost. Optionally set WEB_BIND_ADDRESS=0.0.0.0 to open the web UI on the LAN.
-      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+      context: ../battle-arena-api
+      dockerfile: ../battle-arena-infra/docker/api/Dockerfile
+      target: console
+      additional_contexts:
+        lambda: ./docker/api
+    mem_limit: 1024m
+    env_file:
+      - ../battle-arena-api/.env
     environment:
-      VITE_API_BASE_URL: http://localhost:8000
-      CHOKIDAR_USEPOLLING: "true"
-      WATCHPACK_POLLING: "true"
-    volumes:
-      - ../battle-arena-web:/app
-      - web_node_modules:/app/node_modules
+      <<: *api-environment
+      AWS_LAMBDA_FUNCTION_NAME: battle-arena-api-console
+      AWS_LAMBDA_FUNCTION_TIMEOUT: "900"
+    volumes: *api-source
     depends_on:
-      - api
-    networks:
-      - battle_arena
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
-  # Phase 5A — authenticated WebSocket transport only (no PvP / battle rooms).
+  # Lambda: Node.js transport for API Gateway WebSocket ($connect / $default / $disconnect) and
+  # Laravel-initiated hint fan-out. Transport only; Laravel stays authoritative.
+  # Code changes: docker compose up -d --build realtime
   realtime:
+    <<: *lambda-container
+    image: battle-arena-realtime:lambda
     build:
       context: ../battle-arena-realtime
-      dockerfile: Dockerfile
+      dockerfile: ../battle-arena-infra/docker/realtime/Dockerfile
+    mem_limit: 256m
     environment:
+      AWS_LAMBDA_FUNCTION_NAME: battle-arena-realtime
+      AWS_LAMBDA_FUNCTION_TIMEOUT: "29"
+      AWS_LAMBDA_FUNCTION_MEMORY_SIZE: "256"
+      AWS_REGION: ${MINIO_REGION:-us-east-1}
+      # Execution-role credentials in AWS; static dummies for SigV4 signing locally.
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
       NODE_ENV: production
-      HOST: "0.0.0.0"
-      PORT: "3001"
       LOG_LEVEL: info
-      LOG_PRETTY: "false"
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://redis:6379/0
       WS_TICKET_REDIS_PREFIX: ${WS_TICKET_REDIS_PREFIX:-battle-arena:ws-ticket:}
       WS_TICKET_TTL_SECONDS: ${WS_TICKET_TTL_SECONDS:-30}
       WS_ROOM_GRANT_REDIS_PREFIX: ${WS_ROOM_GRANT_REDIS_PREFIX:-battle-arena:ws-room-grant:}
-      REALTIME_NOTIFICATIONS_CHANNEL: ${PVP_REALTIME_CHANNEL:-battle-arena:realtime:notifications:v1}
-      WS_MAX_ROOMS_PER_CONNECTION: "5"
-      WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      WS_REGISTRY_PREFIX: "battle-arena:ws-registry:"
+      WS_ALLOWED_ORIGINS: ${WS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173}
       WS_ALLOW_MISSING_ORIGIN: "true"
-      WS_PATH: /ws
+      WS_MAX_ROOMS_PER_CONNECTION: "5"
       WS_HEARTBEAT_INTERVAL_MS: "30000"
       WS_HEARTBEAT_TIMEOUT_MS: "60000"
       WS_MAX_PAYLOAD_BYTES: "8192"
       WS_MAX_CONNECTIONS: "1000"
       WS_MAX_CONNECTIONS_PER_USER: "5"
       WS_MAX_CONNECTIONS_PER_IP: "20"
-      WS_MAX_CONNECTION_LIFETIME_MS: "3600000"
-      WS_MAX_BUFFERED_BYTES: "65536"
-      SHUTDOWN_TIMEOUT_MS: "10000"
-    ports:
-      # Default localhost. Set REALTIME_BIND_ADDRESS=0.0.0.0 ONLY for physical phone testing.
-      - "${REALTIME_BIND_ADDRESS:-127.0.0.1}:${REALTIME_PORT:-3001}:3001"
+      WS_MANAGEMENT_ENDPOINT: http://gateway:9001/ws
+      # Local-only: route Lambda Invoke API calls to the emulator.
+      LAMBDA_ENDPOINT: http://gateway:9001
     depends_on:
       redis:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "node", "dist/healthcheck.js"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
+
+  # Local stand-in for API Gateway HTTP API (:8000), API Gateway WebSocket API (:3001, stage /ws),
+  # the Lambda Invoke + @connections APIs (internal :9001) and the EventBridge schedule.
+  gateway:
+    image: battle-arena-gateway:local
+    build:
+      context: ./docker/gateway
+    environment:
+      HTTP_PORT: "8100"
+      WS_PORT: "3101"
+      AWS_PORT: "9001"
+      AWS_REGION: ${MINIO_REGION:-us-east-1}
+      WS_STAGE: ws
+      HTTP_API_FUNCTION: battle-arena-api
+      WS_API_FUNCTION: battle-arena-realtime
+      LAMBDA_FUNCTIONS: battle-arena-api=api:8080,battle-arena-api-console=console:8080,battle-arena-realtime=realtime:8080
+      # EventBridge rule: function|rate-seconds|JSON payload. Set SCHEDULES= (empty) to disable.
+      SCHEDULES: '${SCHEDULES-battle-arena-api-console|60|"schedule:run"}'
+    ports:
+      # Default localhost. Set API_BIND_ADDRESS / REALTIME_BIND_ADDRESS=0.0.0.0 ONLY for physical phones.
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8100"
+      - "${REALTIME_BIND_ADDRESS:-127.0.0.1}:${REALTIME_PORT:-3001}:3101"
+    depends_on:
+      api:
+        condition: service_started
+      console:
+        condition: service_started
+      realtime:
+        condition: service_started
     networks:
       - battle_arena
+    restart: unless-stopped
+
+  # S3 + CloudFront stand-in: the real React production build behind Nginx.
+  # Frontend changes: docker compose up -d --build web (or Vite on the host, see README).
+  web:
+    image: battle-arena-web:cdn
+    build:
+      context: ../battle-arena-web
+      dockerfile: ../battle-arena-infra/docker/web/Dockerfile
+      additional_contexts:
+        nginx-config: ./docker/web
+      args:
+        VITE_API_BASE_URL: http://localhost:${API_PORT:-8000}
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    ports:
+      # Default localhost. Optionally set WEB_BIND_ADDRESS=0.0.0.0 to open the web UI on the LAN.
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-3000}:80"
+    networks:
+      - battle_arena
+    restart: unless-stopped
 
 volumes:
   postgres_data:
   minio_data:
-  api_vendor:
-  api_profiles:
-  web_node_modules:
 
 networks:
   battle_arena:

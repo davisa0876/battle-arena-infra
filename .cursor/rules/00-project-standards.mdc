@@ -10,4 +10,5 @@ alwaysApply: true
 - Never delete Docker volumes (e.g. `postgres_data`) without explicit approval.
 - Never rotate Laravel `APP_KEY` with `--force` on startup.
 - Do not hide init failures with `|| true`.
-- Storage/RustFS is optional via `--profile storage` and private by default.
+- Single environment: `docker compose up -d --build` runs the Lambda-style stack (gateway, api, console, realtime, web) plus postgres/redis/minio/mailpit. No profiles, no parallel environments.
+- RustFS (S3 stand-in) always runs and stays private; avatars live there because Lambda has no persistent disk.
