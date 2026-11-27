@@ -544,6 +544,21 @@ Keep documentation and code comments in English. For each implementation phase p
 
 Commercial use of Pokémon-related names/assets requires a separate intellectual-property review.
 
+## 19a. Local environment with production parity (v1.3, 2026-11-27)
+
+**This supersedes §3.2 and §6.3 for local development.** The owner decided that the single local Docker Compose environment is itself production-shaped; there is no separate legacy development stack and no parallel simulation. `docker compose up -d --build` runs Laravel on the official Bref v3 Lambda image (`api` HTTP function, `console` artisan function), the realtime transport as a Node.js 22 Lambda (`realtime`) behind a local API Gateway WebSocket emulator, a local API Gateway HTTP API emulator with an EventBridge-style schedule (`gateway`), the React production build behind Nginx (`web`), and the existing PostgreSQL, Redis, RustFS and Mailpit services with their existing data. Ports (3000 / 8000 / 3001) and client contracts are unchanged; the mobile app is untouched. The old `php artisan serve`, Vite and persistent Node WebSocket containers were removed from Compose; their volumes were kept. Details, daily workflow and remaining differences: `README.md`. Migration state and next steps: `docs/AWS_MIGRATION_CHECKPOINT.md`.
+
+Decision-gate status from this environment (local evidence only; nothing was provisioned):
+
+| Gate | Status |
+|---|---|
+| 3. Laravel-on-Lambda / Bref feasibility | **Feasible locally** with Bref v3 + `bref/laravel-bridge` 3.1 (2.x does not support Laravel 13). Full e2e passes through the HTTP API emulator. S3 session token, Swagger docs path and `telescope:prune` schedule fixed in the API; `bref/*` packages still to be added to `composer.json`. |
+| 4. Redis usage audit | Uses confirmed: tickets/grants (`GETDEL`), presence set/hash, sessions, cache, rate limits, schedule locks, Pub/Sub hints (dev transport only). Upstash single-DB constraint requires `REDIS_CACHE_DB=0` and no `cache:clear`. |
+| 5. WebSocket protocol compatibility | **Compatible without client changes** (web and Expo untouched): Lambda adapter keeps the v1 frames, ticket/grant contracts and presence keys; registry in Redis; `connection.ready` via async self-invoke; Laravel publishes via async Lambda invoke (`PVP_REALTIME_DRIVER=lambda`). |
+| SQS / DynamoDB | Not justified yet (no gameplay jobs; registry fits Redis). |
+
+Neon, Upstash, IAM, CloudFront and real API Gateway behaviour remain unvalidated; see README "Remaining differences from real AWS".
+
 ## 20. Document history and execution confirmation (this revision)
 
 **Version 1.1** updates Version 1.0 to:

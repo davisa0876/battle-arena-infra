@@ -12,5 +12,5 @@ alwaysApply: false
 - Postgres, Redis, and MinIO/RustFS must NEVER be exposed to the LAN. Do not set their bind variables to `0.0.0.0`, and do not derive them from `API_BIND_ADDRESS` / `REALTIME_BIND_ADDRESS`.
 - Physical mobile device testing: set `API_BIND_ADDRESS=0.0.0.0` and `REALTIME_BIND_ADDRESS=0.0.0.0` (optionally `WEB_BIND_ADDRESS=0.0.0.0`), point `PUBLIC_WS_URL` at `ws://<LAN-IP>:3001/ws`, then run `docker compose up -d` to refresh bindings. Revert afterwards.
 - After any port/bind change, run `docker compose ps` and confirm Postgres/Redis still show `127.0.0.1`.
-- Storage (RustFS) stays behind `--profile storage`, private bucket by default; serve files via signed URLs or a scoped public prefix, never `bucket/*`.
+- Storage (RustFS) is private by default; serve files via signed URLs or a scoped public prefix, never `bucket/*`.
 - Do not hide failures with `|| true`.
